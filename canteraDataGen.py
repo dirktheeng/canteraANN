@@ -58,8 +58,10 @@ def runReactor(num_steps = 10000, dt = 1e-6):
 def runReactorForRates(num_steps = 10000, dt = 1e-6):
     initialGasState = list(gas.TPX)
     x = initialGasState.pop(-1)
-    initialGasState += x.tolist() + [dt]
-    initialGasState = np.asarray(initialGasState)
+    species = x.tolist()
+    iN2 = gas.species_index('N2')
+    species.pop(iN2)
+    initialGasState += species
     r = ct.IdealGasReactor(gas)
     sim = ct.ReactorNet([r])
     time = 0.0
@@ -134,56 +136,80 @@ def generateData(Tlow, Trange, Plow, Prange,
     
 def generateDataForRates(Tlow, Trange, Plow, Prange,
                  nLoops = 1000, dt = 1e-9,
-                 baseFile = 'CH4_BFER_Rates', ext='.npy', startNum=0,
-                 num_steps = 1200000):
-    count = startNum
+                 baseFile = 'CH4_BFER_Rates', ext='.npy', fileNum=0,
+                 numSteps = 1200000, nRandSamples = 100):
+
     dirName = os.path.join('.', baseFile+'_Raw_Data')
     if not os.path.exists(dirName):
         os.makedirs(dirName)
         
     rTest = ct.IdealGasReactor(gas)
-    nRxns = rTest.kinetics.n_reactions
+    maxTime = numSteps*dt
+    nFeatures = gas.n_species+2
+    nLabels = rTest.kinetics.n_reactions
     
-    minOutputVals = np.ones(nRxns)*1e12
-    maxOutputVals = np.ones(nRxns)*-1e12
-    saveOutputArr = np.zeros((nRxns,2))
-    minInputVals = np.zeros(m+2)
-    maxInputVals = np.ones(m+2)
-    minInputVals[:2] = [Tlow, Plow]
-    maxInputVals[:2] = [Tlow+Trange, Plow+Prange]
-    saveInputArr = np.zeros((m+2,2))
+#    minOutputVals = np.ones(nRxns)*1e12
+#    maxOutputVals = np.ones(nRxns)*-1e12
+#    saveOutputArr = np.zeros((nRxns,2))
+    minInputVals = np.zeros(nFeatures)
+    maxInputVals = np.ones(nFeatures)
+    minInputVals[0] = 0.0
+    maxInputVals[0] = maxTime   
+    minInputVals[1:3] = [Tlow, Plow]
+    maxInputVals[1:3] = [Tlow+Trange, Plow+Prange]
+    saveInputArr = np.zeros((nFeatures,2))
     saveInputArr[:,0] = minInputVals
     saveInputArr[:,1] = maxInputVals
     for ii in range(nLoops):
         print('starting loop: ', ii)
+        randSamples = np.zeros((nRandSamples, nFeatures+nLabels))
+        continueCalc = False
         try:
+            # generate high res rate integration
             generateRandomGas(Tlow, Trange, Plow, Prange)
-            initialState, rates = runReactorForRates(num_steps = num_steps, dt = dt)
-            fName = '-'.join([baseFile, str(count).rjust(10, '0')])
-            fName += ext
-            fName = os.path.join('.', baseFile+'_Raw_Data', fName)
-            np.save(fName, rates)
-            fName = '-'.join([baseFile+'_initState', str(count).rjust(10, '0')])
-            fName += ext
-            fName = os.path.join('.', baseFile+'_Raw_Data', fName)
-            np.save(fName, initialState)
-            count+=1
-            minoutputv = np.min(rates, 0)
-            minOutputVals = np.minimum(minOutputVals, minoutputv)
-            maxoutputv = np.max(rates,0)
-            maxOutputVals = np.maximum(maxOutputVals, maxoutputv)
+            initialState, rates = runReactorForRates(num_steps = numSteps, dt = dt)
+            continueCalc = True
         except Exception as e:
             print(e)
-    saveOutputArr[:,0] = minOutputVals
-    saveOutputArr[:,1] = maxOutputVals
-
-#    saveInputArr[:,0] = minInputVals
-#    saveInputArr[:,1] = maxInputVals
-#    
-    saveOutputRangeFile = os.path.join(dirName, baseFile + '_Output_Ranges'+ext)
+            
+        if continueCalc:
+            maxTime = numSteps * dt
+            sampleTimes = np.random.random(nRandSamples)
+            floatIntTime = sampleTimes*numSteps
+            sampleTimes *= maxTime
+            indexToData = np.floor(floatIntTime)
+            fractionalStep = floatIntTime - indexToData
+            
+            for i in range(nRandSamples):
+                ind = int(indexToData[i])
+                frc = fractionalStep[i]
+                rtsL = rates[ind,:]
+                rtsH = rates[ind+1,:]
+                interpRts = (rtsH-rtsL) * frc + rtsL
+                randSamples[i,:] = [sampleTimes[i]] + initialState + interpRts.tolist()
+        if ii == 0:
+            saveArr = randSamples
+        else:
+            saveArr = np.vstack((saveArr,randSamples))
+                
+    np.random.shuffle(saveArr)
     saveInputRangeFile = os.path.join(dirName, baseFile + '_Input_Ranges'+ext)
-    np.save(saveOutputRangeFile, saveOutputArr)
     np.save(saveInputRangeFile, saveInputArr)
+    saveDataFile = os.path.join(dirName, baseFile + '_Raw_data_'+str(fileNum).rjust(10, '0')+ext)
+    np.save(saveDataFile, saveArr)
+    saveFL = os.path.join(dirName, baseFile + '_num_FL_'+ext)
+    np.save(saveFL, [nFeatures, nLabels])
+    
+def genRateData(Tlow, Trange, Plow, Prange, nFiles = 10,
+                nLoops = 10000, dt = 1e-9,
+                baseFile = 'CH4_BFER_Rates', ext='.npy', fileStartNum=0,
+                numSteps = 1200000, nRandSamples = 100):
+    fNums = [x+fileStartNum for x in range(nFiles)]
+    for f in fNums:
+        generateDataForRates(Tlow, Trange, Plow, Prange,
+                 nLoops = nLoops, dt = dt,
+                 baseFile = baseFile, ext=ext, fileNum=f,
+                 numSteps = numSteps, nRandSamples = nRandSamples)
     
 if __name__ == '__main__':
-    generateDataForRates(300,1500, 100000, 500000, nLoops=5, baseFile='test')
+    genRateData(300,1500, 100000, 500000, nFiles = 1, fileStartNum=10, nLoops=100, nRandSamples = 100)
